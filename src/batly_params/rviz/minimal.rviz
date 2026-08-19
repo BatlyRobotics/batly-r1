@@ -1,0 +1,22 @@
+Visualization Manager:
+  Class: rviz_common/VisualizationManager
+  Displays:
+    - Name: Grid
+      Class: rviz_default_plugins/Grid
+      Enabled: true
+      Cell Size: 1.0
+      Plane: XY
+      Reference Frame: odom
+    - Name: TF
+      Class: rviz_default_plugins/TF
+      Enabled: true
+      Marker Scale: 1.0
+    - Name: Odometry
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Topic: /odom
+      Keep: 100
+      Position Tolerance: 0.1
+      Twist Arrow Style: Arrows
+      Twist Scale: 1.0
+

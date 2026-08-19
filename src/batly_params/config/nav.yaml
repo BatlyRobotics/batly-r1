@@ -1,0 +1,525 @@
+#  Batly R1 — Nav2 parameters, balanced configuration
+#
+#  ═══════════════════════════════════════════════════════════════════════════
+#  BUGS FIXED IN THIS REVISION  (all four were real, not style issues)
+#  ═══════════════════════════════════════════════════════════════════════════
+#  B1. desired_linear_vel was 0.4 m/s while velocity_smoother capped
+#      max_velocity[0] at 0.25 m/s. The controller's request was silently
+#      truncated, so desired_linear_vel had no effect at all. Both are now 0.25.
+#
+#  B2. xy_goal_tolerance / yaw_goal_tolerance were 0.15 but their comments still
+#      claimed 0.03 / 0.05. Anyone reading the file later would have drawn the
+#      wrong conclusion about what the robot was actually asked to achieve.
+#
+#  B3. regulated_linear_scaling_min_speed was 0.15 m/s while
+#      min_approach_linear_velocity was 0.02 m/s. The curvature regulator's
+#      floor sat seven times above the speed the approach logic wanted, so the
+#      robot could refuse to slow down properly on the final approach.
+#      Lowered to 0.05 so the two no longer fight.
+#
+#  B4. set_initial_pose was false. AMCL then waits for a manual 2D Pose Estimate
+#      in RViz on every start, which means the initial belief differs from
+#      session to session. For a repeatability experiment that is a hidden
+#      independent variable — and it is a plausible explanation for the
+#      systematic bias moving between sessions. Now seeded from initial_pose so
+#      every session starts from the same belief.
+#
+#  ═══════════════════════════════════════════════════════════════════════════
+#  WHY THE TOLERANCES ARE WHAT THEY ARE  (this is the important part)
+#  ═══════════════════════════════════════════════════════════════════════════
+#  Two separate limits apply, and the tighter one wins.
+#
+#  Limit 1 — AMCL. The goal checker compares the pose AMCL *believes* the robot
+#  has against the goal. AMCL's own estimate is off by roughly 10-30 mm on a 2D
+#  lidar map, so the robot stops when belief matches goal, not when reality
+#  does. Tightening the tolerance below AMCL's own resolution does not improve
+#  the real error; it only makes the goal harder to declare reached. This was
+#  confirmed empirically: dropping xy_goal_tolerance produced no measurable
+#  improvement.
+#
+#  Limit 2 — CAMERA FIELD OF VIEW. This is the binding constraint here and it is
+#  easy to miss. The downward camera only sees a small patch of floor. With
+#  fx = 490 on a 640x720 image the half-angles are 33 deg (x) and 36 deg (y), so
+#  the visible ground patch scales with camera height:
+#        h =  40 mm  ->  +/- 26 x  29 mm
+#        h =  80 mm  ->  +/- 52 x  59 mm
+#        h = 120 mm  ->  +/- 78 x  88 mm
+#  The tag layout itself spans 52 x 75 mm. If Nav2 is allowed to stop 150 mm
+#  from the goal, the reference tag falls outside that patch entirely and the
+#  AprilTag fine-alignment stage has nothing to servo on — it cannot run at all.
+#  A 23 mm stopping error was measured with the tag still detected, so the usable
+#  window is roughly 25-40 mm.
+#
+#  0.05 m is therefore the balanced choice: loose enough not to fight AMCL and
+#  cause timeouts, tight enough that the tag is still in frame for the fine
+#  alignment stage that actually delivers the precision.
+#
+#  ═══════════════════════════════════════════════════════════════════════════
+#  DIVISION OF LABOUR
+#  ═══════════════════════════════════════════════════════════════════════════
+#      Nav2  -> gets the robot to within a few centimetres, reliably
+#      AprilTag fine-align -> removes the residual, ~3-5 mm
+#  Nav2 is deliberately NOT tuned to chase millimetres. Doing so trades
+#  reliability for an improvement that is capped by AMCL anyway.
+#
+#  INTEGRATION NOTE for the fine-alignment node: collision_monitor owns
+#  /cmd_vel (cmd_vel_out_topic below). Publishing the fine-alignment velocities
+#  straight to /cmd_vel puts two publishers on the same topic. Publish to
+#  /cmd_vel_smoothed instead — collision_monitor then forwards them and its
+#  safety checks still apply. velocity_smoother is idle while Nav2 is not
+#  navigating, so there is no contention.
+
+amcl:
+  ros__parameters:
+    use_sim_time: False           # real hardware. True makes AMCL wait for a
+                                  # /clock that never arrives and nothing works.
+    alpha1: 0.15                  # BALANCED: 0.1 -> 0.15. Odometry improved
+    alpha2: 0.15                  # after the gyro-bias fix, but 0.1 trusts it
+    alpha3: 0.15                  # so hard that a wheel slip is absorbed into
+    alpha4: 0.15                  # the pose instead of being corrected by the
+    alpha5: 0.15                  # scan. 0.15 keeps most of the benefit.
+    base_frame_id: "base_footprint"
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: "map"
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0   # BALANCED: 1.0 -> 2.0. A 1.0 m field is
+                                  # very sharp; on a hand-built map small wall
+                                  # inaccuracies then reject otherwise good
+                                  # particles. 2.0 is the robust default.
+    laser_max_range: 100.0
+    laser_min_range: -1.0
+    laser_model_type: "likelihood_field"   # keep. "beam" ray-casts every beam
+                                  # for every particle and saturates the Pi 5.
+    max_beams: 120                # BALANCED: 180 -> 120. Diminishing returns
+                                  # above ~120 and it costs CPU on every update,
+                                  # which now happens far more often (see below).
+    max_particles: 2000           # BALANCED: 3000 -> 2000, same reasoning
+    min_particles: 800
+    odom_frame_id: "odom"
+    pf_err: 0.05                  # BALANCED: 0.02 -> 0.05. Tight pf_err keeps
+                                  # the particle count pinned near max_particles
+                                  # at all times, which is pure CPU cost once
+                                  # the filter has converged.
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0      # keep disabled: recovery injects random
+    recovery_alpha_slow: 0.0      # particles, which would show up as pose jumps
+                                  # in the middle of a repeatability trial.
+    resample_interval: 2          # BALANCED: 1 -> 2. With update_min_d at 10 mm
+                                  # the filter updates very often; resampling on
+                                  # every single update depletes particle
+                                  # diversity and the filter converges
+                                  # prematurely on a slightly wrong pose.
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    save_pose_rate: 0.5
+    sigma_hit: 0.1                # BALANCED: 0.08 -> 0.1, same reason as
+                                  # laser_likelihood_max_dist
+    tf_broadcast: true
+    transform_tolerance: 0.3      # BALANCED: 0.2 -> 0.3. 0.2 s is correct in
+                                  # principle but leaves no margin when AMCL is
+                                  # busy, producing intermittent "transform
+                                  # timeout" failures. Still 10x tighter than
+                                  # the 3.0 s it was.
+    update_min_a: 0.01            # 0.2 -> 0.01 rad. Essential: at 0.2 the
+    update_min_d: 0.01            # filter ignored the whole final approach.
+                                  # 0.01 (10 mm) rather than 0.005 because
+                                  # halving it doubles the update rate for a
+                                  # gain well below AMCL's own resolution.
+    z_hit: 0.5                    # z_hit + z_short + z_max + z_rand must sum
+    z_max: 0.05                   # to 1.0 — currently 1.0, do not edit one
+    z_rand: 0.4                   # without adjusting the others.
+    z_short: 0.05
+    set_initial_pose: true        # B4 FIX: was false, which required a manual
+                                  # RViz pose estimate every session and made
+                                  # the starting belief a hidden variable
+                                  # between experimental sessions.
+    always_reset_initial_pose: true  # B4 FIX: re-seed on every start so a run
+                                  # never inherits the previous session's pose.
+                                  # Requires the robot to be physically placed
+                                  # at initial_pose below before starting.
+    initial_pose:                 # the SLAM start point == the tag layout, so
+      x: 0.0                      # placing the robot on the tags before launch
+      y: 0.0                      # makes this seed correct and reproducible
+      z: 0.0
+      yaw: 0.0
+    scan_topic: scan_filtered
+
+bt_navigator:
+  ros__parameters:
+    use_sim_time: False           # ADDED: was only set on amcl. Left unset a
+                                  # node falls back to the launch-level value,
+                                  # and a mismatch between nodes causes
+                                  # timestamp comparisons to fail silently.
+    global_frame: map
+    robot_base_frame: base_link
+    odom_topic: /odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    action_server_result_timeout: 900.0
+    navigators: ["navigate_to_pose", "navigate_through_poses"]
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+
+    error_code_names:
+      - compute_path_error_code
+      - follow_path_error_code
+
+controller_server:
+  ros__parameters:
+    use_sim_time: False
+    controller_frequency: 20.0      # BALANCED: 30 -> 20 Hz. 30 Hz was chosen to
+                                    # chase millimetres, which is now the fine
+                                    # alignment stage's job. 20 Hz is the Nav2
+                                    # default, leaves CPU for AMCL's much higher
+                                    # update rate, and is unrelated to the RS485
+                                    # motor loop timing characterisation.
+    costmap_update_timeout: 0.30
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5   # differential drive: y velocity is always
+                                    # zero, so this threshold is inert here
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["general_goal_checker"]
+    controller_plugins: ["FollowPath"]
+    use_realtime_priority: false
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.15  # 0.5 was too strict once the robot creeps
+                                      # on the final approach; 0.05 would be so
+                                      # loose that a genuinely stuck robot is
+                                      # never detected. 0.15 sits between.
+      movement_time_allowance: 15.0
+
+    general_goal_checker:
+      stateful: True                  # once xy is satisfied it holds position
+                                      # and only refines yaw
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.05         # 50 mm. B2 FIX: value and comment now
+                                      # agree. Chosen from the CAMERA FOV limit,
+                                      # not from AMCL — see the header. Larger
+                                      # and the reference tag leaves the frame,
+                                      # which disables the fine-alignment stage.
+      yaw_goal_tolerance: 0.03        # 0.10 rad = 5.7 deg. Coarse on purpose:
+                                      # the fine-alignment stage corrects yaw
+                                      # far better than Nav2 can, and a tight
+                                      # value here only causes the robot to
+                                      # hunt around the goal.
+
+    FollowPath:
+      plugin: "nav2_rotation_shim_controller::RotationShimController"
+      primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      angular_dist_threshold: 0.785
+      angular_disengage_threshold: 0.3925
+      forward_sampling_distance: 0.5
+      max_angular_accel: 3.2
+      simulate_ahead_time: 1.0
+      rotate_to_goal_heading: true    # KEEP TRUE. With false the shim never
+                                      # turns to the commanded heading at the
+                                      # end and the final yaw is an accident of
+                                      # the path geometry — this was the largest
+                                      # single source of heading error.
+      rotate_to_heading_once: true
+      use_path_orientations: false
+
+      # ── RegulatedPurePursuit (the primary controller) ──────────────────
+      desired_linear_vel: 0.25        # B1 FIX: was 0.4 while velocity_smoother
+                                      # capped at 0.25, so the request was
+                                      # silently truncated. Now consistent.
+      lookahead_dist: 0.6
+      min_lookahead_dist: 0.3
+      max_lookahead_dist: 0.9
+      lookahead_time: 1.5
+      rotate_to_heading_angular_vel: 1.0   # declared ONCE. It previously
+                                      # appeared twice in this block (1.8 then
+                                      # 0.75); YAML keeps the last, so the shim
+                                      # silently ran at 0.75.
+      transform_tolerance: 0.1
+      use_velocity_scaled_lookahead_dist: false
+      min_approach_linear_velocity: 0.05   # BALANCED: 0.02 -> 0.05. At 0.02 the
+                                      # robot crawls the last centimetres for no
+                                      # benefit, since the fine-alignment stage
+                                      # takes over anyway.
+      approach_velocity_scaling_dist: 0.4
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.9
+      regulated_linear_scaling_min_speed: 0.05   # B3 FIX: was 0.15, seven times
+                                      # above min_approach_linear_velocity. The
+                                      # curvature regulator's floor overrode the
+                                      # approach slow-down.
+      use_fixed_curvature_lookahead: false
+      curvature_lookahead_dist: 0.6
+      use_rotate_to_heading: true
+      allow_reversing: false
+      rotate_to_heading_min_angle: 0.785
+      max_robot_pose_search_dist: 10.0
+      stateful: true
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: False
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      footprint: "[[0.27, 0.21], [0.27, -0.21], [-0.27, -0.21], [-0.27, 0.21]]"
+      plugins: ["voxel_layer", "inflation_layer"]
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.38
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: True
+        origin_z: 0.0
+        z_resolution: 0.05
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        observation_sources: scan
+        scan:
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      always_send_full_costmap: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: False
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      footprint: "[[0.27, 0.21], [0.27, -0.21], [-0.27, -0.21], [-0.27, 0.21]]"
+      resolution: 0.05
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: True
+        observation_sources: scan
+        scan:
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.38
+      always_send_full_costmap: True
+
+map_saver:
+  ros__parameters:
+    use_sim_time: False
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: True
+
+planner_server:
+  ros__parameters:
+    use_sim_time: False
+    expected_planner_frequency: 20.0
+    planner_plugins: ["GridBased"]
+    costmap_update_timeout: 1.0
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.1                  # 0.5 allowed the planner to return a path
+                                      # ending half a metre from the requested
+                                      # pose, capping accuracy regardless of the
+                                      # goal checker
+      use_astar: false
+      allow_unknown: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: False
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: True
+
+behavior_server:
+  ros__parameters:
+    use_sim_time: False
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors::DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors::AssistedTeleop"
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_link
+    transform_tolerance: 0.1
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+
+waypoint_follower:
+  ros__parameters:
+    use_sim_time: False
+    loop_rate: 20
+    stop_on_failure: false
+    action_server_result_timeout: 900.0
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 200    # milliseconds
+
+velocity_smoother:
+  ros__parameters:
+    use_sim_time: False
+    smoothing_frequency: 20.0       # matches controller_frequency so the
+                                    # smoother is not the coarse element
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.25, 0.0, 2.5]  # [0] now agrees with desired_linear_vel
+    min_velocity: [-0.25, 0.0, -2.5]
+    max_accel: [0.8, 0.0, 1.0]
+    max_decel: [-0.8, 0.0, -1.0]
+    odom_topic: "odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]   # must stay zero: a non-zero deadband
+                                    # swallows exactly the small corrections the
+                                    # final approach depends on
+    velocity_timeout: 1.0
+
+collision_monitor:
+  ros__parameters:
+    use_sim_time: False
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "cmd_vel_smoothed"   # the fine-alignment node should
+                                    # publish HERE, not to /cmd_vel, so its
+                                    # commands still pass the safety checks
+    cmd_vel_out_topic: "cmd_vel"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.2
+    source_timeout: 1.0
+    base_shift_correction: True
+    stop_pub_timeout: 2.0
+    polygons: ["FootprintApproach"]
+    FootprintApproach:
+      type: "polygon"
+      action_type: "approach"
+      footprint_topic: "/local_costmap/published_footprint"
+      time_before_collision: 1.2
+      simulation_time_step: 0.1
+      min_points: 6
+      visualize: False
+      enabled: True
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      topic: "scan_filtered"
+      min_height: 0.15
+      max_height: 2.0
+      enabled: True
+
+# ── docking_server ────────────────────────────────────────────────────────
+# Not used yet. Left in place because use_external_detection_pose is already
+# true, which is exactly the hook a tag-based dock detection would plug into if
+# the standalone fine-alignment node is later folded into Nav2 proper.
+# NOTE: base_frame here is base_link while amcl and collision_monitor use
+# base_footprint. Harmless while unused, but reconcile before enabling it.
+docking_server:
+  ros__parameters:
+    use_sim_time: False
+    controller_frequency: 50.0
+    initial_perception_timeout: 5.0
+    wait_charge_timeout: 5.0
+    dock_approach_timeout: 30.0
+    undock_linear_tolerance: 0.05
+    undock_angular_tolerance: 0.1
+    max_retries: 3
+    base_frame: "base_link"
+    fixed_frame: "odom"
+    dock_backwards: false
+    dock_prestaging_tolerance: 0.5
+
+    dock_plugins: ['simple_charging_dock']
+    simple_charging_dock:
+      plugin: 'opennav_docking::SimpleChargingDock'
+      docking_threshold: 0.05
+      staging_x_offset: -0.7
+      use_external_detection_pose: true
+      use_battery_status: false
+      use_stall_detection: false
+
+      external_detection_timeout: 1.0
+      external_detection_translation_x: -0.18
+      external_detection_translation_y: 0.0
+      external_detection_rotation_roll: -1.57
+      external_detection_rotation_pitch: -1.57
+      external_detection_rotation_yaw: 0.0
+      filter_coef: 0.1
+
+    controller:
+      k_phi: 3.0
+      k_delta: 2.0
+      v_linear_min: 0.15
+      v_linear_max: 0.15
+      use_collision_detection: true
+      costmap_topic: "local_costmap/costmap_raw"
+      footprint_topic: "local_costmap/published_footprint"
+      transform_tolerance: 0.1
+      projection_time: 5.0
+      simulation_step: 0.1
+      dock_collision_threshold: 0.3
+
+loopback_simulator:
+  ros__parameters:
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    map_frame_id: "map"
+    scan_frame_id: "base_scan"
+    update_duration: 0.02

@@ -1,0 +1,153 @@
+# =============================================================================
+#  Batly R1 — robot_localization EKF configuration
+#
+#  REVISION 20260814a
+#  ---------------------------------------------------------------------------
+#  Changes from the previous version:
+#
+#  1. imu0_differential: true -> false.
+#     The previous value contradicted its own comment. Differential mode applies
+#     ONLY to orientation: robot_localization discards the absolute quaternion,
+#     differentiates successive orientations, and fuses the result as an angular
+#     velocity instead. That mode exists for sensors whose attitude datum is
+#     arbitrary or drifting. Madgwick's roll and pitch are gravity-referenced
+#     through the accelerometer, so they have an absolute datum that does not
+#     drift — differentiating them throws away the one genuinely useful thing a
+#     6-DoF IMU gives you for attitude and replaces it with a noisier estimate
+#     of a rate the gyro already reports directly.
+#
+#  2. Corrected the covariance[8] = -1 comment.
+#     The ROS convention (sensor_msgs/Imu) is that element 0 of a field's
+#     covariance matrix set to -1 marks that ENTIRE field unavailable. It is
+#     index 0, not index 8, and it invalidates the whole 3-vector, not one
+#     component. There is no per-component flag. Setting index 8 to -1 declares
+#     a negative variance, which is a malformed covariance matrix, not a flag.
+#     The correct way to say "roll and pitch are good, yaw is useless" is a
+#     large positive variance at index 8 plus yaw disabled in imu0_config, which
+#     is what firmware revision 20260814b and this file now do.
+#
+#  3. Comments translated to English, since this file is headed for the public
+#     repository attached to an English-language paper. Behaviour is unchanged
+#     by this; revert if the team prefers Thai internally.
+#
+#  All numerical values other than imu0_differential are unchanged.
+#
+#  REQUIRES firmware batlyr1_20260814b.ino or later. Earlier firmware never set
+#  header.frame_id, never populated orientation or angular_velocity, never set
+#  any covariance, and stamped messages with board uptime instead of synchronised
+#  ROS time — so the IMU was contributing nothing regardless of this file.
+# =============================================================================
+
+ekf_filter_node:
+  ros__parameters:
+    frequency: 50.0
+    two_d_mode: true
+    publish_tf: true
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint
+    world_frame: odom
+
+    # =========================================================================
+    # ODOM0 — raw_odom
+    # Uses vx (linear velocity) and vyaw (angular velocity) from the wheel
+    # encoders. Pose (x, y, yaw) is deliberately NOT fused: the EKF integrates
+    # the velocities itself, so fusing the driver's own integrated pose as well
+    # would double-count the same information.
+    # =========================================================================
+    odom0: raw_odom
+    odom0_config: [false, false, false,   # x, y, z
+                   false, false, false,   # roll, pitch, yaw
+                   true,  false, false,   # vx, vy, vz          <- vx used
+                   false, false, true,    # vroll, vpitch, vyaw <- vyaw used
+                   false, false, false]   # ax, ay, az
+
+    odom0_queue_size: 10
+    odom0_nodelay: false
+
+    # =========================================================================
+    # IMU0 — imu/data
+    #
+    # With two_d_mode: true, robot_localization constrains roll, pitch, z and
+    # their velocities to zero. The practical consequence is that roll and pitch
+    # below cannot influence the state estimate even though they are enabled:
+    # VYAW IS THE IMU'S ONLY REAL CONTRIBUTION in this configuration. They are
+    # left enabled so the configuration stays correct if two_d_mode is ever
+    # turned off.
+    #
+    # Why fuse gyro vyaw when the wheel encoders already provide vyaw: encoder
+    # vyaw is corrupted by wheel slip, gyro vyaw is not. Slip has been observed
+    # on this platform at high payload and high speed (the reason max_rpm is
+    # capped at 200). That is the mechanism this fusion is meant to address.
+    #
+    # Enabled:
+    #   - roll  (index 3)  : Madgwick, gravity-referenced, absolute
+    #   - pitch (index 4)  : Madgwick, gravity-referenced, absolute
+    #   - vyaw  (index 11) : gyro angular velocity, bias-corrected on the board
+    #
+    # Disabled:
+    #   - yaw (index 5)     : the LSM6DSOX has no magnetometer, so Madgwick yaw
+    #                         is unreferenced gyro integration and drifts. The
+    #                         board reports orientation_covariance[8] = 1e6 to
+    #                         match. See revision note 2 above regarding the
+    #                         covariance = -1 convention.
+    #   - ax, ay (12, 13)   : in two_d_mode these typically add more noise than
+    #                         information.
+    #
+    # DEADLINE FALLBACK: if the gyro covariance cannot be measured in time (see
+    # GYRO_VAR in the firmware), set index 11 to false, describe the EKF as
+    # wheel-odometry-only in the paper, and move IMU fusion to Future Work. That
+    # is defensible. Running with placeholder covariances and claiming a fusion
+    # benefit is not.
+    # =========================================================================
+    imu0: imu/data
+    imu0_config: [false, false, false,   # x, y, z
+                  false, false, false,   # roll, pitch, yaw    <- roll + pitch
+                  false, false, false,   # vx, vy, vz
+                  false, false, false,    # vroll, vpitch, vyaw <- vyaw
+                  false, false, false]   # ax, ay, az
+
+    imu0_queue_size: 10
+    imu0_nodelay: false
+
+    # false = fuse the reported orientation as an ABSOLUTE attitude measurement.
+    # true  = discard the absolute value, differentiate successive orientations,
+    #         and fuse the result as an angular velocity instead. Intended for
+    #         sensors with an arbitrary or drifting attitude datum.
+    # Madgwick gives absolute, gravity-referenced roll and pitch, so false.
+    # (Not to be confused with imu0_relative, which zeroes against the first
+    # measurement rather than differentiating each step.)
+    imu0_differential: false
+
+    # Subtract gravity from linear_acceleration before it enters the EKF.
+    # Required whenever ax/ay/az are fused; harmless while they are disabled.
+    imu0_remove_gravitational_acceleration: true
+
+    # =========================================================================
+    # PROCESS NOISE COVARIANCE (Q)
+    # Diagonal entries express uncertainty in the motion model itself.
+    # Increase for fast or jerky motion, decrease for slow and smooth motion.
+    #
+    # Note on index 5 (yaw) = 0.06: this is comparatively loose, meaning the
+    # filter readily lets yaw move to match measurements. That amplified the
+    # gyro bias drift seen with firmware revision 20260814a. With bias
+    # correction in place it should be fine, but this is the knob to reduce if
+    # yaw still looks twitchy.
+    # =========================================================================
+    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.06, 0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025, 0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.025, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.04, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.01, 0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.01, 0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.01, 0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.01, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.015]
+

@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>amr_timing</name>
+  <version>1.0.0</version>
+  <description>Modbus control-loop timing characterisation, including idle and loaded sweeps with CPU utilisation</description>
+  <maintainer email="pisak.ch@eng.buu.ac.th">Pisak Chermprayong</maintainer>
+  <license>Apache-2.0</license>
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-serial</exec_depend>
+  <exec_depend>python3-psutil</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

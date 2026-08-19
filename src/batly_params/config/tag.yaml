@@ -1,0 +1,19 @@
+/**:
+    ros__parameters:
+        image_transport: raw
+        family: 36h11
+        size: 0.03           # tag size, 30 mm
+        max_hamming: 0
+
+        detector:
+            threads: 1
+            decimate: 2.0
+            blur: 0.0
+            refine: True
+            sharpening: 0.25
+            debug: False
+
+        tag:
+            ids: [0]           # detect tag ID 0 only
+            #frames: [charging_dock_apriltag]  # optional per-tag frame name
+            #sizes: [0.03]                    # optional per-tag size override
